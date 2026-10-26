@@ -77,26 +77,28 @@ export class AppComponent implements OnInit {
 
   async openCohort(): Promise<void> {
     await this.run(async () => {
+      const code = this.code();
       const cohort = await this.api.openCohort({
-        code: this.code(),
+        code,
         title: this.title(),
         track: this.track(),
         instructor: this.instructor(),
         seatCapacity: Number(this.capacity()),
       });
-      this.code.set('');
+      if (this.code() === code) this.code.set('');
       this.selectedCode.set(cohort.code);
     });
   }
 
   async book(): Promise<void> {
     await this.run(async () => {
+      const reference = this.reference();
       await this.api.book({
         cohortCode: this.selectedCode(),
-        reference: this.reference(),
+        reference,
         seats: Number(this.seats()),
       });
-      this.reference.set('');
+      if (this.reference() === reference) this.reference.set('');
     });
   }
 
