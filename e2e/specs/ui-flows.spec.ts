@@ -1,9 +1,10 @@
 import { test, expect, Page } from '@playwright/test';
+import { ADMIN, signIn } from './support';
 
 const run = () => Date.now().toString(36).toUpperCase() + Math.floor(Math.random() * 1000);
 
 async function openAccount(page: Page, code: string, capacity: number, shown: string) {
-  await page.goto('/');
+  await signIn(page, ADMIN);
   await page.getByLabel('Cohort code').fill(code);
   await page.getByLabel('Seat capacity').fill(String(capacity));
   await page.getByRole('button', { name: 'Open cohort' }).click();

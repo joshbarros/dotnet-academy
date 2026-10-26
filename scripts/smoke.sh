@@ -12,17 +12,23 @@ say() { printf '  %s\n' "$*"; }
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 jget() { python3 -c "import sys,json; d=json.load(sys.stdin); print(d$1)"; }
 
+ADMIN_EMAIL="${ADMIN_EMAIL:-admin@academy.local}"
+ADMIN_PASSWORD="${ADMIN_PASSWORD:-AcademyAdmin2026}"
+CUSTOMER_PASSWORD="Smoke-Passw0rd1"
+code_of() { curl -s -o /dev/null -w '%{http_code}' "$@"; }
+token_of() { python3 -c "import sys,json; print(json.load(sys.stdin)['accessToken'])"; }
+
 open_cohort() { # code seatCapacity -> prints nothing
-  curl -sf -X POST "$API/api/cohorts" -H "$JSON" \
+  curl -sf -X POST "$API/api/cohorts" -H "$JSON" -H "$ADM" \
     -d "{\"code\":\"$1\",\"title\":\"Smoke Course\",\"track\":\"Engineering\",\"instructor\":\"Ada Lovelace\",\"seatCapacity\":$2}" >/dev/null \
     || fail "could not open cohort $1"
 }
 book() { # code reference seats -> prints enrollment id
-  curl -sf -X POST "$API/api/enrollments" -H "$JSON" \
+  curl -sf -X POST "$API/api/enrollments" -H "$JSON" -H "$CUS" \
     -d "{\"cohortCode\":\"$1\",\"reference\":\"$2\",\"seats\":$3}" | jget "['id']"
 }
-enrollment_field() { curl -sf "$API/api/enrollments/$1" | jget "['$2']"; }
-remaining() { curl -sf "$API/api/cohorts/$1" | jget "['seatsLeft']"; }
+enrollment_field() { curl -sf -H "$ADM" "$API/api/enrollments/$1" | jget "['$2']"; }
+remaining() { curl -sf -H "$ADM" "$API/api/cohorts/$1" | jget "['seatsLeft']"; }
 
 wait_for() { # description command... : polls up to 30s until the command succeeds
   local what="$1"; shift
@@ -35,11 +41,25 @@ wait_for() { # description command... : polls up to 30s until the command succee
 status_is() { [ "$(enrollment_field "$1" status)" = "$2" ]; }
 remaining_is() { [ "$(remaining "$1")" = "$2" ]; }
 terminal() { case "$(enrollment_field "$1" status)" in Enrolled|Rejected|Withdrawn) return 0 ;; *) return 1 ;; esac; }
-event_types() { curl -sf "$API/api/enrollments/$1/events" | python3 -c "import sys,json; print(' '.join(e['type'] for e in json.load(sys.stdin)))"; }
+event_types() { curl -sf -H "$ADM" "$API/api/enrollments/$1/events" | python3 -c "import sys,json; print(' '.join(e['type'] for e in json.load(sys.stdin)))"; }
 dlq_is() { [ "$(dlq_count)" = "$1" ]; }
 dlq_count() { curl -sf -u platform:platform "$RABBIT/api/queues/%2F/passes.work.dlq" | jget "['messages']"; }
 
 curl -sf "$API/api/health" >/dev/null || fail "API is not healthy at $API; run: docker compose up --build --wait"
+
+echo "0. authentication and ownership"
+[ "$(code_of "$API/api/cohorts")" = 401 ] || fail "an anonymous request should be 401"
+[ "$(code_of -X POST "$API/api/auth/login" -H "$JSON" -d "{\"email\":\"$ADMIN_EMAIL\",\"password\":\"wrong-Passw0rd\"}")" = 401 ] || fail "a wrong password should be 401"
+ADM="Authorization: Bearer $(curl -sf -X POST "$API/api/auth/login" -H "$JSON" -d "{\"email\":\"$ADMIN_EMAIL\",\"password\":\"$ADMIN_PASSWORD\"}" | token_of)" || fail "the administrator could not sign in"
+CUS="Authorization: Bearer $(curl -sf -X POST "$API/api/auth/register" -H "$JSON" -d "{\"email\":\"smoke-$RUN@example.com\",\"password\":\"$CUSTOMER_PASSWORD\"}" | token_of)" || fail "could not register a customer"
+OTHER="Authorization: Bearer $(curl -sf -X POST "$API/api/auth/register" -H "$JSON" -d "{\"email\":\"other-$RUN@example.com\",\"password\":\"$CUSTOMER_PASSWORD\"}" | token_of)"
+[ "$(code_of -X POST "$API/api/cohorts" -H "$JSON" -H "$CUS" -d '{"code":"X"}')" = 403 ] || fail "a customer must not open cohorts"
+open_cohort "A-$RUN" 5
+IDA="$(book "A-$RUN" "LRN-$RUN-OWN" 1)"
+[ "$(code_of -H "$OTHER" "$API/api/enrollments/$IDA")" = 404 ] || fail "another customer must get 404 for someone else's enrollment"
+[ "$(code_of -H "$CUS" "$API/api/enrollments/$IDA/events")" = 403 ] || fail "the event log is staff only"
+[ "$(code_of -X POST -H "$OTHER" "$API/api/enrollments/$IDA/withdrawal")" = 404 ] || fail "another customer must not withdraw it"
+say "401 anonymous, 401 bad password, 403 customer opening a cohort, 404 for another customer, 403 on the event log"
 
 echo "1. input is validated at the door"
 open_cohort "V-$RUN" 10
@@ -49,7 +69,7 @@ for body in \
   "{\"cohortCode\":\"V-$RUN\",\"reference\":\"R-$RUN\",\"seats\":6}" \
   "{\"cohortCode\":\"V-$RUN\",\"reference\":\"R-$RUN\",\"seats\":4294967297}" \
   "{\"cohortCode\":\"V-$RUN\",\"reference\":\"R-$RUN\",\"seats\":9223372036854775807}"; do
-  code="$(curl -s -o /dev/null -w '%{http_code}' -X POST "$API/api/enrollments" -H "$JSON" -d "$body")"
+  code="$(code_of -X POST "$API/api/enrollments" -H "$JSON" -H "$CUS" -d "$body")"
   [ "$code" = 400 ] || fail "expected 400 for $body, got $code"
 done
 say "empty, zero, over-limit and overflowing seat counts are all 400"
@@ -59,7 +79,7 @@ open_cohort "H-$RUN" 10
 ID="$(book "H-$RUN" "LRN-$RUN-1" 3)"
 wait_for "enrollment to be Enrolled" status_is "$ID" Enrolled
 [ "$(enrollment_field "$ID" feeCents)" = 15200 ] || fail "fee should be 3 x 4900 + 500 cents"
-[ "$(curl -sf "$API/api/passes/$ID" | jget "['status']")" = Issued ] || fail "access pass not issued"
+[ "$(curl -sf -H "$ADM" "$API/api/passes/$ID" | jget "['status']")" = Issued ] || fail "access pass not issued"
 wait_for "remaining seats to be 7" remaining_is "H-$RUN" 7
 TYPES="$(event_types "$ID")"
 for t in seats.reserve seats.held pass.issued; do
@@ -95,7 +115,7 @@ IDP="$(book "P-$RUN" "LRN-POISON-$RUN" 2)"
 wait_for "poison enrollment to be Rejected" status_is "$IDP" Rejected
 wait_for "seats to be restored to 5" remaining_is "P-$RUN" 5
 wait_for "passes.work.dlq to gain one message" dlq_is $((BEFORE + 1))
-[ "$(curl -sf "$API/api/passes/$IDP" | jget "['status']")" = Rejected ] || fail "rejection should be committed on the pass row"
+[ "$(curl -sf -H "$ADM" "$API/api/passes/$IDP" | jget "['status']")" = Rejected ] || fail "rejection should be committed on the pass row"
 [ "$(enrollment_field "$IDP" seatsReleasedAt)" != None ] || fail "enrollment should record the release"
 say "rejected, dead-lettered (+1 in passes.work.dlq), remaining back to 5"
 
@@ -105,21 +125,21 @@ WON=0
 for attempt in 1 2 3; do
   IDR="$(book "R-$RUN" "LRN-$RUN-R$attempt" 2)"
   # The access pass exists before the enrollment is marked Enrolled (the final mark is delayed in compose).
-  wait_for "access pass to exist" curl -sf "$API/api/passes/$IDR"
+  wait_for "access pass to exist" curl -sf -H "$ADM" "$API/api/passes/$IDR"
   if status_is "$IDR" Held; then WON=1; break; fi
   say "window missed on attempt $attempt (enrollment already Enrolled); the withdrawal still has to hold; retrying"
-  curl -sf -X POST "$API/api/enrollments/$IDR/withdrawal" >/dev/null || true
+  curl -sf -X POST -H "$CUS" "$API/api/enrollments/$IDR/withdrawal" >/dev/null || true
   wait_for "enrollment to be Withdrawn" status_is "$IDR" Withdrawn
 done
 [ "$WON" = 1 ] || fail "never caught the enrollment between pass issued and final mark"
-curl -sf -X POST "$API/api/enrollments/$IDR/withdrawal" >/dev/null || fail "withdrawal was refused"
+curl -sf -X POST -H "$CUS" "$API/api/enrollments/$IDR/withdrawal" >/dev/null || fail "withdrawal was refused"
 wait_for "enrollment to be Withdrawn" status_is "$IDR" Withdrawn
 sleep 3 # longer than the final-mark delay: the late mark must not undo the withdrawal
 status_is "$IDR" Withdrawn || fail "the final mark overwrote the withdrawal"
-[ "$(curl -sf "$API/api/passes/$IDR" | jget "['status']")" = Issued ] || fail "the issued pass was rolled back"
+[ "$(curl -sf -H "$ADM" "$API/api/passes/$IDR" | jget "['status']")" = Issued ] || fail "the issued pass was rolled back"
 [ "$(enrollment_field "$IDR" passNumber)" = None ] || fail "the late final mark should have been skipped"
 wait_for "seats to come back" remaining_is "R-$RUN" 6
-code="$(curl -s -o /dev/null -w '%{http_code}' -X POST "$API/api/enrollments/$IDR/withdrawal")"
+code="$(code_of -X POST -H "$CUS" "$API/api/enrollments/$IDR/withdrawal")"
 [ "$code" = 409 ] || fail "second withdrawal should be 409, got $code"
 say "enrollment Withdrawn, pass still Issued, remaining 6, second withdrawal 409"
 
