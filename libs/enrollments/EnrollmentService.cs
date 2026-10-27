@@ -63,7 +63,7 @@ public class EnrollmentService(EnrollmentsDbContext db, ICohortCatalog cohorts, 
         return enrollment;
     }
 
-    public async Task<List<Enrollment>> ListAsync(string? cohortCode, CancellationToken ct)
+    public async Task<(List<Enrollment> Items, int Total)> ListAsync(string? cohortCode, int page, int pageSize, CancellationToken ct)
     {
         var query = db.Enrollments.AsNoTracking();
         if (!user.IsStaff)
@@ -73,7 +73,9 @@ public class EnrollmentService(EnrollmentsDbContext db, ICohortCatalog cohorts, 
         }
         if (!string.IsNullOrWhiteSpace(cohortCode))
             query = query.Where(b => b.CohortCode == cohortCode);
-        return await query.OrderByDescending(b => b.CreatedAt).Take(100).ToListAsync(ct);
+        var total = await query.CountAsync(ct);
+        var items = await query.OrderByDescending(b => b.CreatedAt).Skip((page - 1) * pageSize).Take(pageSize).ToListAsync(ct);
+        return (items, total);
     }
 
     /// <summary>Moves Held or Enrolled to Withdrawn and asks Cohorts to give the seats back. The access pass is not touched.</summary>

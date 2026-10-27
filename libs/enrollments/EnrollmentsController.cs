@@ -19,10 +19,14 @@ public class EnrollmentsController(EnrollmentService service, KafkaLog kafka) : 
         return Accepted($"/api/enrollments/{enrollment.Id}", EnrollmentDto.From(enrollment));
     }
 
-    /// <summary>Your enrollments. Staff see everyone's.</summary>
+    /// <summary>Your enrollments, newest first, a page at a time (default 100, at most 100). Staff see everyone's. The total is in X-Total-Count.</summary>
     [HttpGet]
-    public async Task<IEnumerable<EnrollmentDto>> List([FromQuery] string? cohortCode, CancellationToken ct) =>
-        (await service.ListAsync(cohortCode, ct)).Select(EnrollmentDto.From);
+    public async Task<IEnumerable<EnrollmentDto>> List([FromQuery] string? cohortCode, [FromQuery] int page = 1, [FromQuery] int pageSize = 100, CancellationToken ct = default)
+    {
+        var (items, total) = await service.ListAsync(cohortCode, Math.Max(page, 1), Math.Clamp(pageSize, 1, 100), ct);
+        Response.Headers["X-Total-Count"] = total.ToString();
+        return items.Select(EnrollmentDto.From);
+    }
 
     [HttpGet("{id:guid}")]
     public async Task<EnrollmentDto> Get(Guid id, CancellationToken ct) => EnrollmentDto.From(await service.GetAsync(id, ct));
