@@ -79,7 +79,7 @@ flowchart TB
     api["apps/api: composition root, middleware, endpoints"]
     api --> identity & enrollments & seats & passes
     identity["libs/identity: users, roles, JWT, refresh tokens"]
-    enrollments["libs/enrollments: scheman enrollments"]
+    enrollments["libs/enrollments: schema enrollments"]
     seats["libs/cohorts: schema seats"]
     passes["libs/passes: schema passes"]
     identity & enrollments & seats & passes --> shared["libs/shared: messaging, outbox/inbox, auth primitives, middleware"]
@@ -96,7 +96,7 @@ Modules still talk only through messages: RabbitMQ carries the commands, Kafka k
 | Access token | JWT (HS256), 15 minutes, held **in memory** by the Angular app and sent as `Authorization: Bearer`. The signing key must be at least 32 bytes; the API refuses to start without one. |
 | Refresh token | 256 random bits in an `HttpOnly`, `SameSite=Strict`, `Path=/api/auth` cookie (`Secure` over HTTPS). Only its SHA-256 is stored. Every refresh **rotates** it with a conditional `UPDATE`, so two concurrent refreshes with the same token cannot both win. Presenting a token that was already used revokes the whole family. Refresh and logout also need an `X-Requested-With: academy-web` header, so another site cannot trigger them. |
 | Roles | `Customer` (default at registration), `Staff`, `Admin`. An administrator is seeded from configuration on first start. |
-| Rules | Anonymous: `/api/health`, `/api/auth/*`. Any signed-in user: read cohorts, book, read and withdraw **their own** enrollments and passes. `Staff` and `Admin`: open cohorts, read everything, read the event log. Another user's enrollment or pass is `404`, not `403`, so ids do not leak. The owner in a enrollment is the caller; a body field cannot set it. |
+| Rules | Anonymous: `/api/health`, `/api/auth/*`. Any signed-in user: read cohorts, book, read and withdraw **their own** enrollments and passes. `Staff` and `Admin`: open cohorts, read everything, read the event log. Another user's enrollment or pass is `404`, not `403`, so ids do not leak. The owner in an enrollment is the caller; a body field cannot set it. |
 | Hardening | Rate limit on `/api/auth/*` per client (`RateLimit:AuthPerMinute`), security headers on every response (`nosniff`, `DENY`, strict CSP, `no-referrer`), a correlation id echoed in `X-Correlation-Id` and in every problem response, JSON logs (`Logging:Json`), forwarded headers only when `ForwardedHeaders:Enabled`, a fallback policy that makes every endpoint authenticated unless it opts out, and a readiness endpoint that checks every module schema. |
 
 ## Run it
@@ -124,7 +124,7 @@ docker compose down                   # keeps the Postgres volume; `down -v` dro
 | Kafka 3.8.1 (KRaft, one broker) | 9124 |
 | RabbitMQ 3.13 / management UI (`platform` / `platform`) | 5704 / 15704 |
 
-Inside the Compose network the API and nginx listen on 8080 and Kafka's internal listener is 492.
+Inside the Compose network the API and nginx listen on 8080 and Kafka's internal listener is 9092.
 
 ## Try it with curl
 
@@ -135,26 +135,29 @@ API=http://127.0.0.1:5214
 login() { curl -s -X POST $API/api/auth/login -H 'content-type: application/json' -d "{\"email\":\"$1\",\"password\":\"$2\"}" | python3 -c 'import sys,json; print(json.load(sys.stdin)["accessToken"])'; }
 ADMIN="Authorization: Bearer $(login admin@academy.local AcademyAdmin2026)"
 
-curl -s -X POST $API/api/cohorts -H "$ADMIN" -H 'content-type: application/json' \
-  -d '{"code":"ENGINEERING-RTM-1","title":"Intro to Distributed Systems","track":"Engineering","instructor":"Ada Lovelace","seatCapacity":10}'
-
 curl -s -X POST $API/api/auth/register -H 'content-type: application/json' \
   -d '{"email":"ana@example.com","password":"Passw0rd-Demo1"}'      # 201; its accessToken goes in $ANA below
 ANA="Authorization: Bearer <accessToken>"
 
-curl -s -X POST $API/api/enrollments -H "$ANA" -H 'content-type: application/json' \
-  -d '{"cohortCode":"ENGINEERING-RTM-1","reference":"LRN-1001","seats":3}'
-# 202, status Requested. Use the returned id:
+curl -s -H "$ADMIN" -X POST $API/api/cohorts \
+  -H 'content-type: application/json' \
+  -d '{"code":"DIST-SYS-101","title":"Intro to Distributed Systems","track":"Engineering","instructor":"Ada Lovelace","seatCapacity":10}'
 
-curl -s -H "$ANA" $API/api/enrollments/<id>             # Enrolled after a few seconds, with a access pass number
+curl -s -H "$ANA" -X POST $API/api/enrollments \
+  -H 'content-type: application/json' \
+  -d '{"cohortCode":"DIST-SYS-101","reference":"LRN-1001","seats":3}'
+# 202, status Requested, feeCents 15200. Use the returned id:
+
+curl -s -H "$ANA" $API/api/enrollments/<id>          # Enrolled after a few seconds, with a pass number
 curl -s -H "$ANA" $API/api/passes/<id>
-curl -s -H "$ANA" $API/api/cohorts/ENGINEERING-RTM-1     # seatsLeft 7
-curl -s -H "$ADMIN" $API/api/enrollments/<id>/events    # the Kafka log; staff only (a customer gets 403)
+curl -s -H "$ANA" $API/api/cohorts/DIST-SYS-101      # seatsLeft 7
+curl -s -H "$ADMIN" $API/api/enrollments/<id>/events   # the Kafka log for this enrollment
 
-curl -s -X POST -H "$ANA" $API/api/enrollments/<id>/withdrawal   # seats come back; the access pass stays
+curl -s -H "$ANA" -X POST $API/api/enrollments/<id>/withdrawal \
+  -H 'content-type: application/json'                       # seats come back; the access pass stays
 ```
 
-A enrollment is validated at the door: reference required (at most 40 characters), seats from 1 to 20. The fee is 4,900 cents per seat plus a 7,500 cent platform fee. The poison match is a case-sensitive substring: `LRN-POISON-7` and any longer token containing `POISON` match.
+An enrollment is validated at the door: learner reference required (at most 40 characters), 1 to 5 seats. The fee is 4,900 cents per seat plus a 500 cent platform fee. The poison match is a case-sensitive substring: `LRN-POISON-7` and any longer token containing `POISON` match.
 
 ## Develop with Nx
 
@@ -264,7 +267,7 @@ apps/api       thin host: composition root, middleware, endpoints
 apps/web       Angular 21, styled with Tailwind 4 utilities only (sign-in, role-aware workspace)
 libs/shared    messaging (outbox, inbox, relay, consumers), auth primitives, middleware
 libs/identity  users, roles, JWT, refresh tokens          (schema identity)
-libs/enrollments  enrollment rules and the saga's first step    (scheman enrollments)
+libs/enrollments  enrollment rules and the saga's first step    (schema enrollments)
 libs/cohorts  the only writer of the seats left     (schema seats)
 libs/passes access passs                            (schema passes)
 tests/         Academy.UnitTests, Academy.IntegrationTests
